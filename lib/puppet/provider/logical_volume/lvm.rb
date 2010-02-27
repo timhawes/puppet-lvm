@@ -26,69 +26,35 @@ Puppet::Type.type(:logical_volume).provide :lvm do
     end
 
     def size
-        if @resource[:size] =~ /^\d+\.?\d{0,2}([KMGTPE])/i
-            unit = $1.downcase
-        end
-
-        raw = lvs('--noheading', '--unit', unit, path)
-
-        if raw =~ /\s+(\d+)\.(\d+)#{unit}/
-            if $2.to_i == 00
-                return $1 + unit.capitalize
-            else
-                return $1 + '.' + $2 + unit.capitalize
-            end
+        canonical = Size.parse(@resource[:size])
+        if canonical
+            raw = lvs('--noheading', '--unit', canonical.unit.downcase, path)
+            Size.parse(raw)
         end
     end
 
-    def size=(new_size)
-        lvm_size_units = { "K" => 1, "M" => 1024, "G" => 1048576, "T" => 1073741824, "P" => 1099511627776, "E" => 1125899906842624 }
-        lvm_size_units_match = lvm_size_units.keys().join('|')
+    def size=(raw)
+        new_size = Size.parse(raw)
+        current_size = size
+        vg_extent = extent
 
-        resizeable = false
-        current_size = size()
-
-        if current_size =~ /(\d+\.{0,1}\d{0,2})(#{lvm_size_units_match})/i
-            current_size_bytes = $1.to_i
-            current_size_unit  = $2.upcase
-        end
-
-        if new_size =~ /(\d+)(#{lvm_size_units_match})/i
-            new_size_bytes = $1.to_i
-            new_size_unit  = $2.upcase
-        end
-
-        ## Get the extend size
-        if lvs('--noheading', '-o', 'vg_extent_size', '--units', 'k', path) =~ /\s+(\d+)\.\d+k/
-            vg_extent_size = $1.to_i
-        end
-
-        ## Verify that it's a extension: Reduce is potentially dangerous and should be done manually
-        if lvm_size_units[current_size_unit] < lvm_size_units[new_size_unit]
-            resizeable = true
-        elsif lvm_size_units[current_size_unit] > lvm_size_units[new_size_unit]
-            if (current_size_bytes / lvm_size_units[current_size_unit]) < (new_size_bytes / lvm_size_units[new_size_unit])
-                resizeable = true
+        if new_size >= current_size
+            if new_size.fits?(vg_extent)
+                return lvextend( '-L', size, path)
+            else
+                fail "Cannot extend to size #{new_size} because volume group extent size is #{vg_extent} KB"
             end
-        elsif lvm_size_units[current_size_unit] == lvm_size_units[new_size_unit]
-            if new_size_bytes > current_size_bytes
-                resizeable = true
-            end
-        end
-
-        if not resizeable
-            fail( "Decreasing the size requires manual intervention (#{size} < #{current_size})" )
         else
-            ## Check if new size fits the extend blocks
-            if new_size_bytes * lvm_size_units[new_size_unit] % vg_extent_size != 0
-                p new_size_bytes * lvm_size_units[new_size_unit] % vg_extent_size
-                fail( "Cannot extend to size #{size} because VG extent size is #{vg_extent_size} KB" )
-            end
-            return lvextend( '-L', size, path)
+            fail "Decreasing the size requires manual intervention (#{new_size} < #{current_size})"
         end
     end
 
     private
+
+    def extent
+        raw = lvs('--noheading', '-o', 'vg_extent_size', '--units', 'k', path)
+        raw[/\s+(\d+)\.\d+k/, 1].to_i
+    end
 
     def lvs_pattern
         /\s+#{Regexp.quote @resource[:name]}\s+/
@@ -96,6 +62,57 @@ Puppet::Type.type(:logical_volume).provide :lvm do
 
     def path
         "/dev/#{@resource[:volume_group]}/#{@resource[:name]}"
+    end
+
+    class Size
+        include Comparable
+
+        UNITS = {
+            "K" => 1,
+            "M" => 1024,
+            "G" => 1048576,
+            "T" => 1073741824,
+            "P" => 1099511627776,
+            "E" => 1125899906842624 }
+
+        UNIT_PATTERN = UNITS.keys.join('|')
+
+        PATTERN = /(\d+(?:\.?\d+)?)(#{UNIT_PATTERN})/i
+
+        def self.parse(text)
+            new(text) if text.match(PATTERN)
+        end
+
+        attr_reader :unit
+        def initialize(raw)
+            @raw = raw
+            parse_value!
+        end
+
+        def <=>(other)
+            kilobytes <=> other.kilobytes
+        end
+
+        def kilobytes
+            UNITS[@unit] * @value
+        end
+
+        def fits?(extent)
+            @value % extent == 0
+        end
+
+        def to_s
+            @raw
+        end
+
+        private
+
+        def parse_value!
+            match = @raw.match(PATTERN)
+            @value = Float(match[1])
+            @unit = match[2].upcase
+        end
+
     end
 
 end

@@ -25,5 +25,8 @@ Puppet::Type.newtype(:logical_volume) do
                 raise ArgumentError , "#{value} is not a valid logical volume size"
             end
         end
+        def insync?(value)
+            value == provider.size.to_s
+        end
     end
 end
